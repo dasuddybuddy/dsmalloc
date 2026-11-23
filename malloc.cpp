@@ -1,13 +1,21 @@
 #include <iostream>
 #include <cstddef>
+#include <cassert>
+#include <unistd.h>
 
 class block_meta {
+public:
 	std::size_t size;
 	block_meta *next;
 	bool free;
 	int magic; // For debugging only. TODO: remove this in non-debug mode.
+};
 
-	block_meta *find_free_block(block_meta **last, std::size_t size) {
+
+	block_meta *global_base = nullptr;
+	inline constexpr std::size_t META_SIZE = sizeof(block_meta);
+	
+block_meta *find_free_block(block_meta **last, std::size_t size) {
 		block_meta *current = global_base;
 		while (current && !(current->free && current->size >= size)) {
 			*last = current;
@@ -18,9 +26,9 @@ class block_meta {
 
 	block_meta *request_space(block_meta* last, std::size_t size) {
 		block_meta *block;
-		block = sbrk(0);
-		void *request = srbk(size + META_SIZE);
-		static_assert((static_cast<void*>(block) == request) // Not thread safe. 
+		block = static_cast<block_meta*>(sbrk(0));
+		void *request = sbrk(size + META_SIZE);
+		assert(reinterpret_cast<void*>(block) == request); // Not thread safe. 
 		if (request == (void*) -1) {
 			return nullptr; // sbrk failed
 		}
@@ -39,30 +47,27 @@ class block_meta {
 	block_meta *get_block_ptr(void *ptr) {
 		return (block_meta*)ptr - 1;
 	}
-}
-
-inline constexpr std::size_t META_SIZE = sizeof(block_meta);
-void *global_base = nullptr;
 
 
 void *malloc(std::size_t size){
 	block_meta *block;
 	// TODO: align size?
-	
+	block_meta *last = nullptr;
+
 	if (size <= 0) {
 		return nullptr;
 	}
 	
 	if (!global_base) { // First call.
-		block->request_space(nullptr, size);
+		block = request_space(nullptr, size);
 		if (!block) {
 			return nullptr;
 		}
 		global_base = block;
 	} else {
-		block->find_free_block(last, size);
+		block = find_free_block(&last, size);
 		if (!block) { // Failed to find free block.
-			block->request_space(last, size);
+			block = request_space(last, size);
 			if (!block) {
 				return nullptr;
 			}
@@ -72,16 +77,17 @@ void *malloc(std::size_t size){
 			block->magic = 0x77777777;
 		}
 	}
+	return block + 1;
 }
 
-void *free(void *ptr) {
+void free(void *ptr) {
 	if (!ptr) {
 		return;
 	}
 	// TODO: consider merging blocks once splitting blocks is implemented
 	block_meta* block_ptr = get_block_ptr(ptr);
-	static_assert(block_ptr->free == 0);
-	static_assert(block_ptr->magic == 0x77777777 || block_ptr->magic == 0x12345678);
+	assert(block_ptr->free == 0);
+	assert(block_ptr->magic == 0x77777777 || block_ptr->magic == 0x12345678);
 	block_ptr->free = 1;
 	block_ptr->magic = 0x55555555;
 }
@@ -106,12 +112,12 @@ void *realloc(void *ptr, std::size_t size) {
 		return nullptr;
 	}
 	memcpy(new_ptr, ptr, block_ptr->size);
-	delete ptr;
+	free(ptr);
 	return new_ptr;
 }
 
 void *calloc(std::size_t nelem, std::size_t elsize) {
-	std::size_t sizze = nelem * elsize // TODO: check for overflow.
+	std::size_t size = nelem * elsize; // TODO: check for overflow.
 	void *ptr = malloc(size);
 	memset(ptr, 0, size);
 	return ptr;
